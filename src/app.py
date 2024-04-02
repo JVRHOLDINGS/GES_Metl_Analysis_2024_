@@ -134,7 +134,7 @@ col_data_spread = pd.DataFrame(col_data_spread)
 # CREATE CORRELATION MATRIX
 # pad the data by the number of rows in window size
 data_corr = data_model.copy()
-data_corr = data_model.copy().drop('Date', axis=1)
+data_corr = data_corr.drop('Date', axis=1)
 data_corr = data_corr.iloc[:(number_days + corr_matrix_days)]
 
 # reverse the rows so padded rows are at the top
