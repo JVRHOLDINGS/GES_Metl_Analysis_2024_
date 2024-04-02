@@ -10,8 +10,6 @@ from dash import html
 from dash.dependencies import Input, Output
 import scipy
 from scipy import stats
-import certifi
-cafile=certifi.where()
 
 PATH = pathlib.Path(__file__).parent
 DATA_PATH = PATH.joinpath("data").resolve()
