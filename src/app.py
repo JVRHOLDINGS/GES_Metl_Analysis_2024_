@@ -6,6 +6,7 @@ pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', 50)
 import numpy as np
 import plotly.graph_objects as go
+import plotly.figure_factory as ff
 from plotly.subplots import make_subplots
 import openpyxl
 from dash import Dash
@@ -14,6 +15,9 @@ from dash import html
 from dash.dependencies import Input, Output
 import scipy
 from scipy import stats, integrate
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
 from scipy.stats import gaussian_kde
 from dateutil.relativedelta import relativedelta
 
