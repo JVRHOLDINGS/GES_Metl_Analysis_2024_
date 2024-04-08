@@ -12,6 +12,7 @@ from dash import Dash
 from dash import dcc
 from dash import html
 from dash.dependencies import Input, Output
+import scipy
 from scipy import stats, integrate
 from scipy.stats import gaussian_kde
 from dateutil.relativedelta import relativedelta
