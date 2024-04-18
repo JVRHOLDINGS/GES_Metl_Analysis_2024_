@@ -15,21 +15,23 @@ from dash.dependencies import Input, Output
 import scipy
 from scipy import stats, integrate
 from scipy.stats import gaussian_kde
+from sklearn.linear_model import LassoCV
+from sklearn.model_selection import TimeSeriesSplit
+import statsmodels.api as sm
 from dateutil.relativedelta import relativedelta
 
 PATH = pathlib.Path(__file__).parent
 DATA_PATH = PATH.joinpath("data").resolve()
 df = pd.read_excel(DATA_PATH.joinpath("metallics dataset.xlsx"))
 
-app = Dash(__name__, title="Metallics Analysis", meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}])
+app = Dash(__name__, title="Metallics Analysis",
+           meta_tags=[{"name": "viewport", "content": "width=device-width, initial-scale=1"}])
 server = app.server
 
 # VERSION 2 TO DO
 # CLEAN CODE
 # ALL RATIO/SIGNALS ANOTHER WAY OTHERWISE SIGNALS ARE VERY LOCAL
-# MEAN REVERSION TIME GRAPHIC
 # PRICE PREDICTION BASED REGRESSION ON RATIO/SPREAD LT AVE - DEVIATIONS * MEAN REVERSION
-# GRAPH OF PRODUCT(S) + DISTRIBUTION OF RETURNS + SEASONALITY
 # INPUT FOR FUTURES CURVES +> OUTPUT TO PRODUCT
 
 # GLOBAL INPUTS
@@ -328,8 +330,10 @@ def item_analysis(ref_idx,tperiod, time, nyears):
                                    'Oct', 'Nov', 'Dec'],
                          row=2, col=2)
 
+
     figure_ref_data = reference_item.iloc[:num_elements_list[time_period]].iloc[::-1]
     figure_dates = reference_item_dates.iloc[:num_elements_list[time_period]].iloc[::-1]
+
     current_y = figure_ref_data[t]
     current_x = figure_dates[t]
     fig.add_trace(go.Scatter(x=figure_dates,
@@ -347,7 +351,7 @@ def item_analysis(ref_idx,tperiod, time, nyears):
             marker=dict(
                 size=6,
                 color='black',
-                symbol='circle')),  # or 'circle' for a dot
+                symbol='circle')),
             row=1, col=1
             )
 
@@ -429,26 +433,31 @@ col_data_spread = pd.DataFrame(col_data_spread)
 # pad the data by the number of rows in window size
 data_corr = data_model.copy()
 data_corr = data_corr.drop('Date', axis=1)
+LT_corr_data = data_corr.copy().iloc[:(long_run_days + corr_matrix_days)]
 data_corr = data_corr.iloc[:(number_days + corr_matrix_days)]
 
 # reverse the rows so padded rows are at the top
 data_corr = data_corr[::-1]
+LT_corr_data = LT_corr_data[::-1]
 correlation = data_corr.rolling(corr_matrix_days).corr()
+LT_correlation = LT_corr_data.rolling(corr_matrix_days).corr()
 # slice the first rows of the window size, will be NaN
 correlation = correlation[(corr_matrix_days * len(correlation.columns)):]
+LT_correlation = LT_correlation[(corr_matrix_days * len(LT_correlation.columns)):]
 # reverse the correlation back to original order
 correlation = correlation[::-1]
+LT_correlation = LT_correlation[::-1]
 # Convert the DataFrame to a list of lists
 data_HM = correlation.values.tolist()
 
 # CALCULATE MEAN REVERSION TIMES
 # calculate the difference from the current value in a row and the long term average
-diffs_ratios = all_ratios - LT_ave_ratios.values
-diffs_spreads = all_spreads - LT_ave_spreads.values
+diffs_ratios = all_ratios_pretrunc - LT_ave_ratios.values
+diffs_spreads = all_spreads_pretrunc - LT_ave_spreads.values
 
 # Create a dataframe to store the average revert time for each item
-average_revert_time_ratios = pd.DataFrame(index=['Average Revert Time'], columns=all_ratios.columns)
-average_revert_time_spreads = pd.DataFrame(index=['Average Revert Time'], columns=all_spreads.columns)
+average_revert_time_ratios = pd.DataFrame(index=['Average Revert Time'], columns=all_ratios_pretrunc.columns)
+average_revert_time_spreads = pd.DataFrame(index=['Average Revert Time'], columns=all_spreads_pretrunc.columns)
 
 # Calculate the average revert time for each item
 for i in range(len(diffs_ratios.columns)):
@@ -548,16 +557,32 @@ weightings = []
 # weighting method absolute, square or logarithmic derived from correlation matrix
 for k in range(0, len(correlation), cols):
     wgt = correlation[k:k + cols]
+    LT_wgt = LT_correlation[k:k + cols]
     if weighting_type == 'absolute':
         wgt = wgt.abs()
+        LT_wgt = LT_wgt.abs()
     elif weighting_type == 'square':
         wgt = wgt.pow(2)
+        LT_wgt = LT_wgt.pow(2)
     elif weighting_type == 'log':
         wgt = np.log(wgt + 1.0000001)
+        LT_wgt = np.log(LT_wgt + 1.0000001)
+
+LT_weightings = []
+for k in range(0, len(LT_correlation), cols):
+    LT_wgt = LT_correlation[k:k + cols]
+    if weighting_type == 'absolute':
+        LT_wgt = LT_wgt.abs()
+    elif weighting_type == 'square':
+        LT_wgt = LT_wgt.pow(2)
+    elif weighting_type == 'log':
+        LT_wgt = np.log(LT_wgt + 1.0000001)
 
     for n in range(cols):
         wgt.iloc[n] = wgt.iloc[n] / wgt.iloc[n].sum()
+        LT_wgt.iloc[n] = LT_wgt.iloc[n] / LT_wgt.iloc[n].sum()
     weightings.append(wgt)
+    LT_weightings.append(LT_wgt)
 
 # create weighted averages
 weighted_average_ratio = []
@@ -617,6 +642,165 @@ minimum_pred_price = weighted_average_clean_ratio.where(weighted_average_clean_r
                                                         weighted_average_clean_spread)
 maximum_pred_price = weighted_average_clean_ratio.where(weighted_average_clean_ratio > weighted_average_clean_spread,
                                                         weighted_average_clean_spread)
+
+# MEAN REVERSION GRAPHIC:
+def mean_rev_weighted (input1, input2, weights):
+    AVR = (input1 + input2) / 2
+    weighted_AVR = []
+
+    for i in range(len(weights)):
+        AVR_i = []
+        for j in range(cols):
+            AVR_item = AVR.T[(j*cols):(j*cols)+cols]
+            wgt = weights[i].iloc[cols - 1 - j]
+            product = AVR_item.multiply(wgt, axis=0)
+            total = round(product.sum().sum(),2)
+            AVR_i.append((total))
+        weighted_AVR.append((AVR_i))
+
+    weighted_AVR_df = []
+    for i in range(len(weighted_AVR)):
+        AVR_i_df = pd.DataFrame([weighted_AVR[i]], columns=col_names[0:cols])
+        weighted_AVR_df.append(AVR_i_df)
+
+    return weighted_AVR_df
+
+weight_average_MRT = mean_rev_weighted(average_revert_time_ratios,
+                      average_revert_time_spreads,
+                      LT_weightings)
+def mean_rev_graphic(graphic_data):
+    traces = []
+    for i in range(len(dates)):
+        trace = go.Scatter(
+            x=col_names[0:cols],
+            y=graphic_data[i].values.flatten().tolist(),
+            mode='markers',
+            name='Mean Reversion Time, Days',
+            marker=dict(
+                size=8,
+                color='black',
+                symbol='circle',
+                opacity=0.50
+            )
+        )
+        traces.append(trace)
+    fig = go.Figure(data=traces)
+    fig.update_layout(title="Mean Reversion Days")
+    return fig
+
+def price_regression_analysis(price, dates, ratios, spreads, averatios, avespreads, meanrev):
+    item_idx = 7
+    yvar = price.iloc[:,item_idx+1] # select the y variable
+    item_ratios = ratios.iloc[:,item_idx:item_idx+cols] # select its corresponding daily ratios
+    item_spreads = spreads.iloc[:,item_idx:item_idx+cols] # select its corresponding daily spreads
+    item_averatios = averatios[item_idx:item_idx+cols] # select the long term average ratios
+    item_avespreads = avespreads[item_idx:item_idx+cols] # select the long term average spreads
+
+    ratio_deviation =  (item_ratios - item_averatios).multiply(yvar, axis=0) # calculate the daily deviation of the ratios from the LT average
+    spread_deviation = (item_spreads - item_avespreads) # calculate the daily deviation of the spread from the LT average
+
+    xvar_ratio = [] #list of dataframes
+    for df, (_, row) in zip(meanrev, ratio_deviation.iterrows()):
+        product_ratio = df.multiply(row, axis=1) * 0.003968254 # 1/ 252 trading days
+        xvar_ratio.append(product_ratio) # multiply the deviation from average by the mean reversion time rescaled to days
+
+    xvar_spread = [] #list of dataframes
+    for df, (_, row) in zip(meanrev, spread_deviation.iterrows()):
+        product_spread = df.multiply(row, axis=1) * 0.003968254  # 1/ 252 trading days
+        xvar_spread.append(product_spread) # multiply the deviation from average by the mean reversion time rescaled to days
+
+    # Flatten your data
+    name = col_names[item_idx]
+
+    X = pd.concat(xvar_ratio)
+    X.index = pd.to_datetime(dates) # set x,y to have the same date indices
+    yvar.index = pd.to_datetime(dates) # set x,y to have the same date indices
+    X = X.iloc[::-1] # re-sort data chronologically earliest as first row
+    yvar = yvar.iloc[::-1] # re-sort data chronologically earliest as first row
+    X_dropped = X.dropna() # remove NaN values from regressors
+    yvar_dropped = yvar[X_dropped.index] # re-align the yvar and regressors for dropped values
+    yvar_dropped = yvar_dropped.dropna() # remove NaN values from yvar
+    X_dropped = X_dropped.loc[yvar_dropped.index] # re-align the yvar and regressors for dropped values
+    n_steps = 74
+
+    # Initialize a list to store the forecasts
+    forecasts = []
+
+    # Define the initial training data
+
+    X_train = X_dropped.copy()
+    y_train = yvar_dropped.copy()
+    #print(X_train)
+    # Perform n_steps ahead forecasting
+    for i in range(n_steps):
+        # Fit the model on the training data
+        model = LassoCV(cv=5).fit(X_train, y_train)
+        # Make a one-step ahead forecast
+        X_test = X_train.iloc[[-1]].copy()  # select the last row in X_train
+        forecast = model.predict(X_test)
+        # Append the forecast to the forecasts list
+        forecasts.append(forecast[0])
+        # Add the forecasted value to the training data
+        X_test.iloc[0, 0] = forecast[0]  # replace the first column of X_test with the forecast
+        X_train = pd.concat([X_train, X_test])  # add X_test to X_train
+        y_train = pd.concat([y_train, pd.Series(forecast, index=[X_test.index[0]])])  # add the forecast to y_train
+
+    coefficients = model.coef_
+
+    # Calculate the confidence interval for the forecast
+    # This is a simple method that assumes the residuals are normally distributed
+    # For a more accurate confidence interval, you might want to use a method specific to your model
+    fitted = model.predict(X_dropped)
+    residuals = yvar_dropped - fitted
+    confidence_interval = np.percentile(residuals, [2.5, 97.5])
+
+    # Perform unit conversion
+    if re.search(r'\$/gross ton', name):
+        yvar_dropped = yvar_dropped / 0.984207
+        fitted = model.predict(X_dropped) / 0.984207
+        forecasts = [forecast / 0.984207 for forecast in forecasts]
+
+    elif re.search(r'\$/short ton|\$/cwt', name):
+        yvar_dropped = yvar_dropped / 1.10231
+        fitted = model.predict(X_dropped) / 1.10231
+        forecasts = [forecast / 1.10231 for forecast in forecasts]
+    forecasts = [forecast.item() for forecast in forecasts]
+    print(coefficients)
+    # Create a plot
+    fig = go.Figure()
+
+    # Plot yvar
+    fig.add_trace(go.Scatter(x=yvar_dropped.index, y=yvar_dropped, mode='lines', name=name))
+    # Plot fitted values
+    fig.add_trace(go.Scatter(x=yvar_dropped.index, y=fitted, mode='lines', name='Estimated Prices'))
+    # Plot confidence interval for the fitted values
+    fig.add_trace(go.Scatter(
+        x=yvar_dropped.index.tolist() + yvar_dropped.index.tolist()[::-1],  # x, then x reversed
+        y=(fitted + confidence_interval[0]).tolist() + (fitted + confidence_interval[1]).tolist()[::-1],
+        # upper, then lower reversed
+        fill='toself',
+        fillcolor='rgba(0,100,80,0.075)',  # choose a color
+        line=dict(color='rgba(255,255,255,0)'),  # transparent line
+        hoverinfo='skip',
+        showlegend=False
+    ))
+
+    # Generate n_steps business days from the last date in yvar_dropped.index
+    forecast_index = pd.bdate_range(start=yvar_dropped.index[-1], periods=n_steps + 1)[1:]
+    # Plot forecast
+    fig.add_trace(go.Scatter(x=forecast_index, y=forecasts, mode='lines', name='Forecast Prices'))
+
+
+    fig.show()
+    return
+
+#print(price_regression_analysis(raw_data[:long_run_days],
+                                #all_dates[:long_run_days],
+                                #all_ratios_pretrunc[:long_run_days],
+                                #all_spreads_pretrunc[:long_run_days],
+                                #LT_ave_ratios,
+                                #LT_ave_spreads,
+                                #weight_average_MRT[:long_run_days]))
 
 # GENERATE FIGURES
 # Create a correlation matrix
@@ -1264,7 +1448,18 @@ app.layout = html.Div([
             marks={i: dates[i] for i in range(0, len(dates), 10)},  # Display labels only for every 10th date
         ),
         html.Div(id='pred_price_date_slider-output')  # Display the current step
-    ], style={'margin': '30px 0px'}),  # Increase the spacing between sliders
+    ], style={'margin': '30px 0px'}),
+    dcc.Graph(id='mean_reversion-graph', style={'height': '70vh'}),
+    html.Div([
+        dcc.Slider(
+            id='mean_reversion_date_slider',
+            min=0,
+            max=len(dates) - 1,
+            step=1,
+            value=0,
+            marks={i: dates[i] for i in range(0, len(dates), 10)},  # Display labels only for every 10th date
+        )]),
+        html.Div(id='mean_reversion_date_slider-output'),
     html.Div([
         dcc.Graph(id='ratio_histogram-graph'),
         html.Div([
@@ -1364,7 +1559,6 @@ app.layout = html.Div([
                step=1,
                value=0)])
     ])
-
 @app.callback(
     Output('ratio_std_2d-scatter-plot', 'figure'),
     Output('date_slider_ratio_std-output', 'children'),
@@ -1392,6 +1586,8 @@ app.layout = html.Div([
     Output('t_max_storage', 'children'),
     Output('ref_idx-output', 'children'),
     Output('time-output', 'children'),
+    Output('mean_reversion-graph', 'figure'),
+    Output('mean_reversion_date_slider-output', 'children'),
     Input('date_slider_ratio_std', 'value'),
     Input('item_slider_ratio_std', 'value'),
     Input('date_slider_spread_std', 'value'),
@@ -1409,6 +1605,7 @@ app.layout = html.Div([
     Input('tperiod', 'value'),
     Input('time', 'value'),
     Input('n_years', 'value'),
+    Input('mean_reversion_date_slider', 'value'),
 )
 
 def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_slider_spread_std,
@@ -1416,7 +1613,8 @@ def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_s
                             abs_spread_date_slider, abs_spread_item_slider, pred_price_date_slider,
                             reference_slider_ratio, target_slider_ratio,
                             reference_slider_spread, target_slider_spread,
-                            ref_idx, tperiod, time, n_years):
+                            ref_idx, tperiod, time, n_years,
+                            mean_reversion_date_slider):
     for a in range(len(dates)):
         for g in range(cols):
             fig_std_ratio.data[(g * 3) + (cols * a * 3)].visible = (
@@ -1494,6 +1692,10 @@ def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_s
     item_fig = item_figure_generate[0]
     t_max = item_figure_generate[1]
 
+    MRT_fig = mean_rev_graphic(weight_average_MRT)
+    for f in range(len(dates)):
+        MRT_fig.data[f].visible = (f == mean_reversion_date_slider)
+
     return fig_std_ratio, f'Date {dates[date_slider_ratio_std]}', f'Item {signals_ratio[a].columns.tolist()[item_slider_ratio_std]}', \
         fig_std_spread, f'Date {dates[date_slider_spread_std]}', f'Item {signals_spread[b].columns.tolist()[item_slider_spread_std]}', \
         fig_abs_ratio, f'Date {dates[abs_ratio_date_slider]}', f'Item {abs_ratio_signals[c].columns.tolist()[abs_ratio_item_slider]}', \
@@ -1501,7 +1703,8 @@ def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_s
         fig_pred_price, f'Date {dates[pred_price_date_slider]}', \
         fig_ratio_distribution, ratio_probability_components, f'Reference: {col_names[reference_slider_ratio]}', f'Target: {col_names[target_slider_ratio]}',\
         fig_spread_distribution, spread_probability_components, f'Reference: {col_names[reference_slider_spread]}', f'Target: {col_names[target_slider_spread]}',\
-        item_fig, t_max, f'Item: {col_names[ref_idx]}', f'Date: {all_dates[time]}'
+        item_fig, t_max, f'Item: {col_names[ref_idx]}', f'Date: {all_dates[time]}',\
+        MRT_fig, f'Date {dates[mean_reversion_date_slider]}'
 
 @app.callback(
     Output('time', 'max'),
