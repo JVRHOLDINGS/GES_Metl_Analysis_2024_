@@ -7,3 +7,4 @@ gunicorn
 dash-tools
 openpyxl
 scikit-learn
+statsmodels
