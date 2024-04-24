@@ -17,6 +17,7 @@ from scipy import stats, integrate
 from scipy.stats import gaussian_kde
 from sklearn.linear_model import LassoCV
 from sklearn.model_selection import TimeSeriesSplit
+from statsmodels.tsa.api import VAR
 import statsmodels.api as sm
 from dateutil.relativedelta import relativedelta
 
@@ -36,7 +37,7 @@ server = app.server
 
 # GLOBAL INPUTS
 long_run_days = 3650
-number_days = 30
+number_days = 45
 corr_matrix_days = 45
 weighting_type = 'square'
 
@@ -688,8 +689,7 @@ def mean_rev_graphic(graphic_data):
     fig.update_layout(title="Mean Reversion Days")
     return fig
 
-def price_regression_analysis(price, dates, ratios, spreads, averatios, avespreads, meanrev):
-    item_idx = 7
+def price_regression_analysis(price, dates, ratios, spreads, averatios, avespreads, meanrev, item_idx, n_steps):
     yvar = price.iloc[:,item_idx+1] # select the y variable
     item_ratios = ratios.iloc[:,item_idx:item_idx+cols] # select its corresponding daily ratios
     item_spreads = spreads.iloc[:,item_idx:item_idx+cols] # select its corresponding daily spreads
@@ -712,87 +712,109 @@ def price_regression_analysis(price, dates, ratios, spreads, averatios, avesprea
     # Flatten your data
     name = col_names[item_idx]
 
-    X = pd.concat(xvar_ratio)
-    X.index = pd.to_datetime(dates) # set x,y to have the same date indices
-    yvar.index = pd.to_datetime(dates) # set x,y to have the same date indices
-    X = X.iloc[::-1] # re-sort data chronologically earliest as first row
-    yvar = yvar.iloc[::-1] # re-sort data chronologically earliest as first row
-    X_dropped = X.dropna() # remove NaN values from regressors
-    yvar_dropped = yvar[X_dropped.index] # re-align the yvar and regressors for dropped values
-    yvar_dropped = yvar_dropped.dropna() # remove NaN values from yvar
-    X_dropped = X_dropped.loc[yvar_dropped.index] # re-align the yvar and regressors for dropped values
-    n_steps = 74
+    def VAR_estimation(X, yvar, forecast_steps,dates):
+        X = pd.concat(X)
+        X.index = pd.to_datetime(dates)  # set x,y to have the same date indices
+        yvar.index = pd.to_datetime(dates)  # set x,y to have the same date indices
+        X = X.iloc[::-1]  # re-sort data chronologically earliest as first row
+        yvar = yvar.iloc[::-1]  # re-sort data chronologically earliest as first row
+        X_dropped = X.dropna()  # remove NaN values from regressors
+        yvar_dropped = yvar[X_dropped.index]  # re-align the yvar and regressors for dropped values
+        yvar_dropped = yvar_dropped.dropna()  # remove NaN values from yvar
+        X_dropped = X_dropped.loc[yvar_dropped.index]  # re-align the yvar and regressors for dropped values
 
-    # Initialize a list to store the forecasts
-    forecasts = []
+        # Assuming yvar_dropped is a DataFrame with a single column
+        yvar_name = yvar_dropped.name
+        # Check if yvar_name is in X_dropped
+        if yvar_name in X_dropped.columns:
+            X_dropped = X_dropped.drop(columns=yvar_name)
+        # Now you can concatenate X_dropped and yvar_dropped
+        data = pd.concat([X_dropped, yvar_dropped], axis=1)
 
-    # Define the initial training data
+        # Set frequency of datetime index
+        data = data.asfreq('B')
 
-    X_train = X_dropped.copy()
-    y_train = yvar_dropped.copy()
-    #print(X_train)
-    # Perform n_steps ahead forecasting
-    for i in range(n_steps):
-        # Fit the model on the training data
-        model = LassoCV(cv=5).fit(X_train, y_train)
-        # Make a one-step ahead forecast
-        X_test = X_train.iloc[[-1]].copy()  # select the last row in X_train
-        forecast = model.predict(X_test)
-        # Append the forecast to the forecasts list
-        forecasts.append(forecast[0])
-        # Add the forecasted value to the training data
-        X_test.iloc[0, 0] = forecast[0]  # replace the first column of X_test with the forecast
-        X_train = pd.concat([X_train, X_test])  # add X_test to X_train
-        y_train = pd.concat([y_train, pd.Series(forecast, index=[X_test.index[0]])])  # add the forecast to y_train
+        # Fit the VAR model
+        model = VAR(data)
+        results = model.fit()
 
-    coefficients = model.coef_
+        # Make a forecast
+        forecasts = results.forecast(data.values[-results.k_ar:], forecast_steps)
+        yvar_forecasts = forecasts[:, -1]
+        # Calculate the confidence interval for the forecast
+        # This is a simple method that assumes the residuals are normally distributed
+        # For a more accurate confidence interval, you might want to use a method specific to your model
+        fitted = results.fittedvalues
+        residuals = yvar_dropped - fitted.iloc[:, -1]
+        residuals = residuals.dropna()
+        confidence_interval = np.percentile(residuals, [2.5, 97.5])
 
-    # Calculate the confidence interval for the forecast
-    # This is a simple method that assumes the residuals are normally distributed
-    # For a more accurate confidence interval, you might want to use a method specific to your model
-    fitted = model.predict(X_dropped)
-    residuals = yvar_dropped - fitted
-    confidence_interval = np.percentile(residuals, [2.5, 97.5])
+        return yvar_dropped, fitted, yvar_forecasts, confidence_interval
+
+    yvar_dropped, fitted, yvar_spread_forecasts, confidence_spread_interval = VAR_estimation(xvar_spread, yvar, n_steps,dates)
+    yvar_dropped, fitted, yvar_ratio_forecasts, confidence_ratio_interval = VAR_estimation(xvar_ratio, yvar, n_steps,dates)
 
     # Perform unit conversion
     if re.search(r'\$/gross ton', name):
         yvar_dropped = yvar_dropped / 0.984207
-        fitted = model.predict(X_dropped) / 0.984207
-        forecasts = [forecast / 0.984207 for forecast in forecasts]
-
+        fitted = fitted / 0.984207
+        yvar_spread_forecasts = yvar_spread_forecasts / 0.984207
+        yvar_ratio_forecasts = yvar_ratio_forecasts / 0.984207
     elif re.search(r'\$/short ton|\$/cwt', name):
         yvar_dropped = yvar_dropped / 1.10231
-        fitted = model.predict(X_dropped) / 1.10231
-        forecasts = [forecast / 1.10231 for forecast in forecasts]
-    forecasts = [forecast.item() for forecast in forecasts]
-    print(coefficients)
-    # Create a plot
-    fig = go.Figure()
+        fitted = fitted / 1.10231
+        yvar_spread_forecasts = yvar_spread_forecasts / 1.10231
+        yvar_ratio_forecasts = yvar_ratio_forecasts / 0.984207
 
+    confidence_interval = np.concatenate((confidence_spread_interval,confidence_ratio_interval))
+
+    # create plot
+    fig = go.Figure()
     # Plot yvar
     fig.add_trace(go.Scatter(x=yvar_dropped.index, y=yvar_dropped, mode='lines', name=name))
     # Plot fitted values
-    fig.add_trace(go.Scatter(x=yvar_dropped.index, y=fitted, mode='lines', name='Estimated Prices'))
-    # Plot confidence interval for the fitted values
+    fig.add_trace(go.Scatter(x=yvar_dropped.index, y=fitted.iloc[:, -1], mode='lines', name='Estimated Prices'))
+
+    # Generate n_steps business days from the last date in yvar_dropped.index
+    forecast_index = pd.bdate_range(start=yvar_dropped.index[-1], periods=n_steps + 1)[1:]
+    # Plot yvar_spread_forecasts and yvar_ratio_forecasts
+    fig.add_trace(go.Scatter(x=forecast_index, y=yvar_spread_forecasts, mode='lines', name='Spread Forecasts'))
+    fig.add_trace(go.Scatter(x=forecast_index, y=yvar_ratio_forecasts, mode='lines', name='Ratio Forecasts'))
+
+    # Shaded region between yvar_spread_forecasts and yvar_ratio_forecasts
     fig.add_trace(go.Scatter(
-        x=yvar_dropped.index.tolist() + yvar_dropped.index.tolist()[::-1],  # x, then x reversed
-        y=(fitted + confidence_interval[0]).tolist() + (fitted + confidence_interval[1]).tolist()[::-1],
-        # upper, then lower reversed
+        x=forecast_index.tolist() + forecast_index.tolist()[::-1],
+        y=yvar_spread_forecasts.tolist() + yvar_ratio_forecasts.tolist()[::-1],
         fill='toself',
-        fillcolor='rgba(0,100,80,0.075)',  # choose a color
-        line=dict(color='rgba(255,255,255,0)'),  # transparent line
+        fillcolor='rgba(100,10,80,0.1)',
+        line=dict(color='rgba(255,255,255,0)'),
         hoverinfo='skip',
         showlegend=False
     ))
 
-    # Generate n_steps business days from the last date in yvar_dropped.index
-    forecast_index = pd.bdate_range(start=yvar_dropped.index[-1], periods=n_steps + 1)[1:]
-    # Plot forecast
-    fig.add_trace(go.Scatter(x=forecast_index, y=forecasts, mode='lines', name='Forecast Prices'))
+    # Calculate the maximum and minimum difference from the fitted values
+    max_diff = max(confidence_interval)
+    min_diff = min(confidence_interval)
 
+    shifted_dates_back = yvar_dropped.index.shift(-4, freq='D')
 
-    fig.show()
-    return
+    fig.add_trace(go.Scatter(
+        x=yvar_dropped.index.tolist() + shifted_dates_back.tolist()[::-1],
+        y=(fitted.iloc[:, -1] + max_diff).tolist() + (fitted.iloc[:, -1] + min_diff).tolist()[::-1],
+        fill='toself',
+        fillcolor='rgba(0,100,80,0.05)',
+        line=dict(color='rgba(255,255,255,0)'),
+        hoverinfo='skip',
+        showlegend=False
+    ))
+    fig.update_layout(title=name + " VAR forecast")
+
+    last_date_in_forecast = forecast_index[-1]
+    first_date_in_plot = last_date_in_forecast - pd.DateOffset(days=360)
+    fig.update_xaxes(range=[first_date_in_plot, last_date_in_forecast])
+
+    #fig.show()
+    return fig
 
 #print(price_regression_analysis(raw_data[:long_run_days],
                                 #all_dates[:long_run_days],
@@ -800,7 +822,7 @@ def price_regression_analysis(price, dates, ratios, spreads, averatios, avesprea
                                 #all_spreads_pretrunc[:long_run_days],
                                 #LT_ave_ratios,
                                 #LT_ave_spreads,
-                                #weight_average_MRT[:long_run_days]))
+                                #weight_average_MRT[:long_run_days],2,63))
 
 # GENERATE FIGURES
 # Create a correlation matrix
@@ -1557,7 +1579,28 @@ app.layout = html.Div([
     dcc.Slider(id='time',
                min=0,
                step=1,
-               value=0)])
+               value=0)]),
+    html.Div([
+    dcc.Graph(id='forecast', style={'height': '70vh'}),
+    html.Label('Forecast Horizon: '),
+    dcc.Input(
+        id='n_steps-input',
+        type='number',
+        value=63, # Default 3 Months
+        style={'outline': 'none'}
+        ),
+    html.Div(style={'height': '30px'}),
+    html.Div(id='item_idx_slider-output'),
+    html.Div(style={'height': '30px'}),
+    dcc.Slider(
+        id='item_idx_slider',
+        min=0,
+        max=cols - 1,
+        step=1,
+        value=0,
+        marks={i: col_names[i] for i in range(0, cols, 10)},
+    ),
+        ])
     ])
 @app.callback(
     Output('ratio_std_2d-scatter-plot', 'figure'),
@@ -1588,6 +1631,8 @@ app.layout = html.Div([
     Output('time-output', 'children'),
     Output('mean_reversion-graph', 'figure'),
     Output('mean_reversion_date_slider-output', 'children'),
+    Output('forecast', 'figure'),
+    Output('item_idx_slider-output', 'children'),
     Input('date_slider_ratio_std', 'value'),
     Input('item_slider_ratio_std', 'value'),
     Input('date_slider_spread_std', 'value'),
@@ -1606,6 +1651,8 @@ app.layout = html.Div([
     Input('time', 'value'),
     Input('n_years', 'value'),
     Input('mean_reversion_date_slider', 'value'),
+    Input('item_idx_slider', 'value'),
+    Input('n_steps-input', 'value')
 )
 
 def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_slider_spread_std,
@@ -1614,7 +1661,8 @@ def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_s
                             reference_slider_ratio, target_slider_ratio,
                             reference_slider_spread, target_slider_spread,
                             ref_idx, tperiod, time, n_years,
-                            mean_reversion_date_slider):
+                            mean_reversion_date_slider,
+                            item_idx_slider, n_steps):
     for a in range(len(dates)):
         for g in range(cols):
             fig_std_ratio.data[(g * 3) + (cols * a * 3)].visible = (
@@ -1696,6 +1744,14 @@ def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_s
     for f in range(len(dates)):
         MRT_fig.data[f].visible = (f == mean_reversion_date_slider)
 
+    forecast_fig = price_regression_analysis(raw_data[:long_run_days],
+                                all_dates[:long_run_days],
+                                all_ratios_pretrunc[:long_run_days],
+                                all_spreads_pretrunc[:long_run_days],
+                                LT_ave_ratios,
+                                LT_ave_spreads,
+                                weight_average_MRT[:long_run_days],item_idx_slider,n_steps)
+
     return fig_std_ratio, f'Date {dates[date_slider_ratio_std]}', f'Item {signals_ratio[a].columns.tolist()[item_slider_ratio_std]}', \
         fig_std_spread, f'Date {dates[date_slider_spread_std]}', f'Item {signals_spread[b].columns.tolist()[item_slider_spread_std]}', \
         fig_abs_ratio, f'Date {dates[abs_ratio_date_slider]}', f'Item {abs_ratio_signals[c].columns.tolist()[abs_ratio_item_slider]}', \
@@ -1704,7 +1760,8 @@ def update_figure_ratio_std(date_slider_ratio_std, item_slider_ratio_std, date_s
         fig_ratio_distribution, ratio_probability_components, f'Reference: {col_names[reference_slider_ratio]}', f'Target: {col_names[target_slider_ratio]}',\
         fig_spread_distribution, spread_probability_components, f'Reference: {col_names[reference_slider_spread]}', f'Target: {col_names[target_slider_spread]}',\
         item_fig, t_max, f'Item: {col_names[ref_idx]}', f'Date: {all_dates[time]}',\
-        MRT_fig, f'Date {dates[mean_reversion_date_slider]}'
+        MRT_fig, f'Date {dates[mean_reversion_date_slider]}',\
+        forecast_fig, f'Item: {col_names[item_idx_slider]}'
 
 @app.callback(
     Output('time', 'max'),
