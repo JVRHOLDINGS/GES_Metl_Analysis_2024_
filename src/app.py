@@ -764,7 +764,7 @@ def price_regression_analysis(price, dates, ratios, spreads, averatios, avesprea
         yvar_dropped = yvar_dropped / 1.10231
         fitted = fitted / 1.10231
         yvar_spread_forecasts = yvar_spread_forecasts / 1.10231
-        yvar_ratio_forecasts = yvar_ratio_forecasts / 0.984207
+        yvar_ratio_forecasts = yvar_ratio_forecasts / 1.10231
 
     confidence_interval = np.concatenate((confidence_spread_interval,confidence_ratio_interval))
 
